@@ -36,6 +36,7 @@ from ultralytics.nn.modules import (
     C3Ghost,
     C3k2,
     C3x,
+    CBAM,   # 新注册已有模块CBAM
     CBFuse,
     CBLinear,
     Classify,
@@ -1476,6 +1477,18 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 m.legacy = legacy
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
+
+        #------------------------新增CBAM-------------------------------------------------------------------------------------
+        elif m is CBAM:
+            c1 = ch[f]
+            # 如果用户在 yaml 中写了 kernel_size，例如 [512, 7]，就保留；否则默认 7
+            kernel_size = args[0] if len(args) > 0 else 7
+            if kernel_size not in [3, 7]:
+                LOGGER.warning(f"⚠️ Invalid CBAM kernel_size={kernel_size}, fallback to 7.")
+                kernel_size = 7
+            args = [c1, kernel_size]
+        #------------------------新增CBAM-------------------------------------------------------------------------------------
+
         elif m is CBLinear:
             c2 = args[0]
             c1 = ch[f]
