@@ -69,6 +69,7 @@ from ultralytics.nn.modules import (
     YOLOEDetect,
     YOLOESegment,
     v10Detect,
+    SoftmaxBiFPNLayer,  # ✅ 我的模块
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1488,6 +1489,19 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 kernel_size = 7
             args = [c1, kernel_size]
         #------------------------新增CBAM-------------------------------------------------------------------------------------
+
+        #---------------------BiFPN 专用分支-----------------------------------------------------------------------------------
+        elif m is SoftmaxBiFPNLayer:  # ★ 自定义 BiFPN（官方风格）
+            # YAML 只给一个数字 → “原始 out_ch”
+            out_ch = args[0] if isinstance(args, (list, tuple)) else args
+            # 乘 width_multiple，并做 make_divisible(…,8)
+            out_ch = make_divisible(min(out_ch, max_channels) * width, 8)
+            # 解析输入通道：f 可能是 [6,8,9] 或 int
+            in_chs = [ch[x] for x in (f if isinstance(f, list) else [f])]
+            args = [in_chs, out_ch]  # 真正传给 __init__
+            c2 = out_ch  # 本层输出通道
+        #---------------------------------------------------------------------------------------------------------------------
+
 
         elif m is CBLinear:
             c2 = args[0]

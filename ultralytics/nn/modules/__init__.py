@@ -59,6 +59,7 @@ from .block import (
     ResNetLayer,
     SCDown,
     TorchVision,
+    SoftmaxBiFPNLayer,  # ✅ 就在这里加入它
 )
 from .conv import (
     CBAM,

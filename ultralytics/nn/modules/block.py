@@ -50,6 +50,7 @@ __all__ = (
     "PSA",
     "SCDown",
     "TorchVision",
+    "SoftmaxBiFPNLayer",  # ✅ 我要加的模块
 )
 
 
@@ -1964,3 +1965,74 @@ class SAVPE(nn.Module):
         aggregated = score.transpose(-2, -3) @ x.reshape(B, self.c, C // self.c, -1).transpose(-1, -2)
 
         return F.normalize(aggregated.transpose(-2, -3).reshape(B, Q, -1), dim=-1, p=2)
+
+#---------------------------------------新定义的Bifpn模块--------------------------------------------------------------------------
+class SoftmaxBiFPNLayer(nn.Module):
+    """
+    Softmax 权重融合版本的 BiFPN 层（适用于 YOLOv8/YOLOv11 Neck 替换）
+
+    输入:  多尺度特征 [P3, P4, P5]  （stride =  8, 16, 32）
+    输出:  单尺度特征 p5_out       （stride = 32，等价于原 SPPF 输出）
+           └─ 后续 Head 会先 Upsample → Concat → C2f，保持与官方 YOLOv8 结构一致
+
+    Args:
+        in_chs (List[int]): [C_P3, C_P4, C_P5]  —— 由 parse_model() 自动注入
+        out_ch (int)      : 融合后的统一通道数
+    """
+
+    def __init__(self, in_chs: list, out_ch: int) -> None:
+        super().__init__()
+        assert len(in_chs) == 3, "SoftmaxBiFPNLayer 需要 3 个输入特征 (P3, P4, P5)"
+        c3_in, c4_in, c5_in = in_chs
+        c = out_ch
+
+        # ① lateral 1×1 Conv，把输入通道映射到统一维度 c
+        self.l3 = Conv(c3_in, c, k=1)
+        self.l4 = Conv(c4_in, c, k=1)
+        self.l5 = Conv(c5_in, c, k=1)
+
+        # ② 3×3 Conv 细化
+        self.cv3 = Conv(c, c, k=3)
+        self.cv4 = Conv(c, c, k=3)
+        self.cv5 = Conv(c, c, k=3)
+
+        # 上 / 下采样算子
+        self.upsample   = nn.Upsample(scale_factor=2, mode="nearest")
+        self.downsample = nn.MaxPool2d(2)
+
+        # 可学习融合权重 (Softmax 归一化后使用)
+        self.w1 = nn.Parameter(torch.ones(2, dtype=torch.float32))  # 用于 top‑down
+        self.w2 = nn.Parameter(torch.ones(3, dtype=torch.float32))  # 用于 bottom‑up
+
+    # ---------------------------------------------------------------------------------------------
+
+    def forward(self, x):
+        """
+        Args:
+            x (Tuple[Tensor, Tensor, Tensor]): P3、P4、P5 三个特征
+        Returns:
+            Tensor: 最终融合特征 (stride = 32)
+        """
+        p3, p4, p5 = x  # 分别对应 stride 8 / 16 / 32
+
+        # ----- 1. lateral -----
+        p3 = self.l3(p3)
+        p4 = self.l4(p4)
+        p5 = self.l5(p5)
+
+        # ----- 2. Top‑Down -----
+        w1    = F.softmax(self.w1, dim=0)
+        p4_td = w1[0] * p4 + w1[1] * self.upsample(p5)   # P5 → P4 尺寸
+        p4_td = self.cv4(p4_td)
+
+        # (可选) 得到 P3_out，但后面我们只用 P5_out，所以这一行可注释掉节省显存
+        # p3_out = self.cv3(p3 + self.upsample(p4_td))
+
+        # ----- 3. Bottom‑Up -----
+        w2     = F.softmax(self.w2, dim=0)
+        p5_in  = w2[0] * p5 + w2[1] * self.downsample(p4_td) + w2[2] * self.downsample(p4)
+        p5_out = self.cv5(p5_in)                   # stride 32，通道 c
+
+        # 只返回 p5_out（与官方 SPPF 行为保持一致）
+        return p5_out
+
