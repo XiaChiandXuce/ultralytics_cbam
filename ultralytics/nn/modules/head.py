@@ -870,3 +870,156 @@ class v10Detect(Detect):
             for x in ch
         )
         self.one2one_cv3 = copy.deepcopy(self.cv3)
+
+#------------------------------------------------ 新增姿态不变性优化 -----------------------------------------------
+# ------------------------------------------------------------------------------------------
+#   PoseGCNHead  ——  轻量姿态不变性输出头（检测 + 关键点 + GCN 校正）
+# ------------------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from ultralytics.nn.modules.conv import Conv
+from ultralytics.nn.modules.head import Detect
+
+
+class PoseGCNHead(Detect):
+    """
+    轻量级 Pose-GCN 头：
+    在普通关键点回归后，引入一层骨架图卷积，显式建模关节点拓扑，
+    提升侧身 / 弯曲 / 遮挡情况下的关键点鲁棒性。
+    """
+
+    def __init__(self, nc: int = 80, kpt_shape: tuple = (17, 3), ch: tuple = ()):
+        """
+        Args:
+            nc (int):            类别数（沿用 Detect）
+            kpt_shape (tuple):   (关键点数量, 每点维度)，COCO 17 点默认为 (17,3)
+            ch (tuple):          输入特征通道列表（P5、P4、P3），若忘记传则自动 fallback 为 (256,512,256)
+        """
+        if len(ch) == 0:
+            ch = (256, 512, 256)                      # 默认对应 P5、P4、P3 的通道
+
+        super().__init__(nc, ch)                      # Detect 初始化：注册 box / cls 头
+        self.kpt_shape = kpt_shape
+        self.nk = kpt_shape[0] * kpt_shape[1]         # 17×3 = 51
+
+        # ---------- 关键点卷积分支（参考官方 YOLOv8 Pose） ----------
+        c4 = max(ch[0] // 4, self.nk)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(
+                Conv(x, c4, 3),
+                Conv(c4, c4, 3),
+                nn.Conv2d(c4, self.nk, 1)
+            )
+            for x in ch
+        )
+
+        # ---------- GCN 模块 ----------
+        self.adj = self._build_adj().to(torch.float32)          # (17,17) 邻接矩阵
+        gcn_hidden = 17 * 6                                     # 102，可整除 17
+        assert gcn_hidden % 17 == 0
+        self.gcn1 = nn.Linear(self.kpt_shape[0] * 3, gcn_hidden, bias=False)
+        self.gcn2 = nn.Linear(gcn_hidden, self.kpt_shape[0] * 3, bias=False)
+
+    # ----------------------------------------------------------------------
+    #                           辅助函数
+    # ----------------------------------------------------------------------
+    @staticmethod
+    def _build_adj():
+        """
+        构建 COCO 17-keypoints 的骨架邻接矩阵（如需调整按业务修改）。
+        行归一化后用于 GCN。
+        """
+        edges = [
+            (0, 1), (0, 2), (1, 3), (2, 4),         # 头部
+            (5, 6), (5, 11), (6, 12),               # 肩-腰
+            (11, 12), (11, 13), (12, 14),           # 腰-腿
+            (13, 15), (14, 16),                     # 膝-踝
+            (5, 7), (7, 9), (6, 8), (8, 10)         # 手臂
+        ]
+        A = torch.eye(17)
+        for i, j in edges:
+            A[i, j] = A[j, i] = 1
+        A = A / A.sum(1, keepdim=True)              # 行归一化
+        return A
+
+    def _gcn_forward(self, kpts: torch.Tensor) -> torch.Tensor:
+        """
+        对关键点热力图做一次骨架 GCN 校正。
+        Args:
+            kpts: (bs, 51, H*W) —— 关键点热图展平后的张量
+        Returns:
+            (bs, 51, H*W) —— 校正后的关键点热图
+        """
+        bs, _, hw = kpts.shape
+        kpts = kpts.view(bs, self.kpt_shape[0], self.kpt_shape[1], hw)
+        conf, idx = kpts[:, :, 2].max(-1, keepdim=True)               # (bs,17,1)
+
+        # ⭐ gather 维度对齐
+        idx_expanded = idx.unsqueeze(2).expand(-1, -1, 2, -1)         # (bs,17,2,1)
+        xy = torch.gather(kpts[:, :, :2], -1, idx_expanded).squeeze(-1)  # (bs,17,2)
+
+        feats = torch.cat((xy, conf), 2)                               # (bs,17,3)
+
+        # ---------- GCN: A·X·W1 → SiLU → A·X·W2 ----------
+        A = self.adj.to(feats.device)
+        X = torch.einsum("ij,bjk->bik", A, feats)                      # 邻接聚合
+        X = F.silu(self.gcn1(X.reshape(bs, -1)))                       # 线性 + 激活
+        X = X.view(bs, 17, -1)
+        X = torch.einsum("ij,bjk->bik", A, X)
+        X = self.gcn2(X.reshape(bs, -1)).view(bs, -1)                 # (bs,51)
+
+        # ---------- 将骨架先验作为 bias broadcast 回热力图 ----------
+        X = X.unsqueeze(-1).repeat(1, 1, hw)                          # (bs,51,hw)
+        return kpts.view(bs, -1, hw) + 0.2 * X                        # 0.2 为可调系数
+
+    # ----------------------------------------------------------------------
+    #                   ⭐ 新增：复用官方解码函数
+    # ----------------------------------------------------------------------
+    def kpts_decode(self, bs, kpts):
+        """
+        将 (bs, 51, H*W) 的关键点热图解码为实际坐标。
+        ⚠️ 注意：官方 Pose 模块有该函数，这里复刻一份以兼容推理阶段。
+        """
+        ndim = self.kpt_shape[1]
+        y = kpts.clone()
+        if ndim == 3:
+            y[:, 2::ndim].sigmoid_()  # 置信度
+        return y
+
+    # ----------------------------------------------------------------------
+    #                           前向传播
+    # ----------------------------------------------------------------------
+    def forward(self, x):
+        """
+        返回检测 + 关键点预测：
+            - 训练阶段：返回 (det_out, kpt_heatmap)
+            - 推理阶段：返回 (det+pose 拼接输出, (原 det 输出, kpt_heatmap))
+        """
+        bs = x[0].shape[0]
+
+        # ---------- 关键点热力图（多尺度拼接） ----------
+        kpt = torch.cat(
+            [self.cv4[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)],  # (bs,51,H*W)
+            dim=-1
+        )
+        kpt = self._gcn_forward(kpt)                        # GCN 校正
+
+        # ---------- 检测分支 ----------
+        det = Detect.forward(self, x)
+
+        if self.training:
+            return det, kpt
+
+        # ---------- 推理阶段解码关键点 ----------
+        pred_kpt = self.kpts_decode(bs, kpt)                # ✅ 复用解码
+        return torch.cat([det, pred_kpt], 1) if self.export else (
+            torch.cat([det[0], pred_kpt], 1),
+            (det[1], kpt)
+        )
+
+
+
+
+
+

@@ -1,0 +1,61 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# YOLOv8‑BiFPN‑CBAM‑MobileViT‑Pose object‑detection model (P3/8‑P5/32)
+# Features: SoftmaxBiFPNLayer for multi‑scale fusion + CBAM attention + MobileViTBlock + PoseGCN（姿态不变性优化）
+# Docs: https://docs.ultralytics.com
+
+# ───────────────────────────────────────── Parameters ─────────────────────────────────────────
+nc: 80            # number of classes
+scales:           # compound scaling: depth, width, max_channels
+  n: [0.33, 0.25, 1024]    # YOLOv8n‑BiFPN‑CBAM‑MobileViT‑Pose
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75,  768]
+  l: [1.00, 1.00,  512]
+  x: [1.00, 1.25,  512]
+
+# ───────────────────────────────────────── Backbone (同官方 v8) ─────────────────────────────────────────
+backbone:
+  - [-1, 1, Conv, [64,   3, 2]]     # 0‑P1/2
+  - [-1, 1, Conv, [128,  3, 2]]     # 1‑P2/4
+  - [-1, 3, C2f,  [128, True]]      # 2
+  - [-1, 1, Conv, [256,  3, 2]]     # 3‑P3/8
+  - [-1, 6, C2f,  [256, True]]      # 4 ── P3/8
+  - [-1, 1, Conv, [512,  3, 2]]     # 5‑P4/16
+  - [-1, 6, C2f,  [512, True]]      # 6 ── P4/16
+  - [-1, 1, Conv, [1024, 3, 2]]     # 7‑P5/32
+  - [-1, 3, C2f,  [1024, True]]     # 8
+  - [-1, 1, SPPF, [1024, 5]]        # 9 ── P5/32 (SPPF)
+
+# ───────────────────────────────────────── Head ─────────────────────────────────────────
+head:
+  # ① SoftmaxBiFPNLayer  融合 P3(4) P4(6) P5(9)
+  - [[4, 6, 9], 1, SoftmaxBiFPNLayer, [256]]
+
+  # ② CBAM
+  - [-1, 1, CBAM, [7]]
+
+  # ③ MobileViTBlock（新增）
+  - [-1, 1, MobileViTBlock, [256, 3, 2, 128, 2]]
+
+  # ↓——— YOLOv8 Head ———↓
+  - [-1,       1, nn.Upsample, [None, 2, "nearest"]]      # 13
+  - [[-1, 6],  1, Concat,      [1]]                       # 14
+  - [-1,       3, C2f,         [512]]                     # 15
+
+  - [-1,       1, nn.Upsample, [None, 2, "nearest"]]      # 16
+  - [[-1, 4],  1, Concat,      [1]]                       # 17
+  - [-1,       3, C2f,         [256]]                     # 18  ← P3 路径
+
+  - [-1,       1, Conv,        [256, 3, 2]]               # 19
+  - [[-1, 13], 1, Concat,      [1]]                       # 20  ← 索引改 13！
+  - [-1,       3, C2f,         [512]]                     # 21  ← P4 路径
+
+  - [-1,       1, Conv,        [512, 3, 2]]               # 22
+  - [[-1,  9], 1, Concat,      [1]]                       # 23（P5 原样）
+  - [-1,       3, C2f,         [1024]]                    # 24  ← P5 路径
+
+  # ④ PoseGCNHead —— 行人姿态不变性增强（轻量骨架GCN）
+  - [[12, 15, 18], 1, PoseGCNHead, [nc, [17, 3]]]         # 25
+
+  # Detect — outputs P3, P4, P5
+  - [[18, 21, 24], 1, Detect, [nc]]                       # 26

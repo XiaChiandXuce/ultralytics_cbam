@@ -90,6 +90,7 @@ from .head import (
     YOLOEDetect,
     YOLOESegment,
     v10Detect,
+    PoseGCNHead,
 )
 from .transformer import (
     AIFI,
@@ -181,4 +182,5 @@ __all__ = (
     "TorchVision",
     "Index",
     "A2C2f",
+    "PoseGCNHead",
 )

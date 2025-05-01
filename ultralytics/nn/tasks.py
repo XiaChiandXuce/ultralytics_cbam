@@ -71,6 +71,7 @@ from ultralytics.nn.modules import (
     v10Detect,
     SoftmaxBiFPNLayer,  # ✅ 我的模块
     MobileViTBlock,     # 新增的复杂背景适应性模块
+    PoseGCNHead,        # 新增姿态不变性
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1513,6 +1514,29 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             depth = args[4] if len(args) > 4 else 2
             args = [c1, c2, k, patch, dim, depth]
         #---------------------------------------------------------------------------------------------------
+
+        #------------------------------ 新增PoseGCNHead-----------------------------------------------------------------------------------
+        elif m is PoseGCNHead:
+            # f 可能是 int，也可能是 list；统一转成 list 方便处理
+            f = f if isinstance(f, list) else [f]
+
+            # 1) 输入通道列表（来自上游各层）
+            ch_in = [ch[j] for j in f]  # e.g. [256, 512, 256]
+
+            # 2) 解析 YAML 里的参数
+            nc = args[0]  # 第一个参数：类别数
+            kpt = args[1] if len(args) > 1 else (17, 3)  # 第二参数：关键点形状
+            # 若 YAML 里还想自定义 GCN 隐藏层等，可继续解析
+
+            # 3) 重新组装 args 传给构造函数
+            args = [nc, kpt, tuple(ch_in)]  # (nc, kpt_shape, ch)
+
+            # 4) 输出通道 —— 这里和 Detect 一样：用 ch_in[0] 作为占位即可
+            #    反正 PoseGCNHead 是终端 head，不会再被其他层 concat
+            ch_out = ch_in[0]
+            ch.append(ch_out)
+
+        #-------------------------------------------------------------------------------------------------
         elif m is CBLinear:
             c2 = args[0]
             c1 = ch[f]
