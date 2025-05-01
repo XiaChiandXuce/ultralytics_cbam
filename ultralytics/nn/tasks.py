@@ -70,6 +70,7 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     v10Detect,
     SoftmaxBiFPNLayer,  # ✅ 我的模块
+    MobileViTBlock,     # 新增的复杂背景适应性模块
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1502,7 +1503,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = out_ch  # 本层输出通道
         #---------------------------------------------------------------------------------------------------------------------
 
-
+        #------------------------------ 新增MobileViTBlock的复杂背景模块-----------------------------------------------------------------------------------
+        elif m is MobileViTBlock:
+            c1 = ch[f]
+            c2 = args[0]
+            k = args[1] if len(args) > 1 else 3
+            patch = args[2] if len(args) > 2 else 2
+            dim = args[3] if len(args) > 3 else 128
+            depth = args[4] if len(args) > 4 else 2
+            args = [c1, c2, k, patch, dim, depth]
+        #---------------------------------------------------------------------------------------------------
         elif m is CBLinear:
             c2 = args[0]
             c1 = ch[f]

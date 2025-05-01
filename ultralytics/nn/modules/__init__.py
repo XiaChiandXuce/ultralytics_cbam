@@ -60,6 +60,7 @@ from .block import (
     SCDown,
     TorchVision,
     SoftmaxBiFPNLayer,  # ✅ 就在这里加入它
+    MobileViTBlock, # 新增的复杂背景模块
 )
 from .conv import (
     CBAM,

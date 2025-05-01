@@ -51,6 +51,7 @@ __all__ = (
     "SCDown",
     "TorchVision",
     "SoftmaxBiFPNLayer",  # ✅ 我要加的模块
+    "MobileViTBlock"
 )
 
 
@@ -2036,3 +2037,38 @@ class SoftmaxBiFPNLayer(nn.Module):
         # 只返回 p5_out（与官方 SPPF 行为保持一致）
         return p5_out
 
+#--------------------------------------------- 新增复杂背景适应性 -----------------------------------------
+class MobileViTBlock(nn.Module):
+    """A lightweight MobileViT block for background adaptation."""
+    def __init__(self, c1, c2, kernel_size=3, patch_size=2, transformer_dim=128, depth=2):
+        """
+        Args:
+            c1: input channels
+            c2: output channels
+            kernel_size: conv kernel size
+            patch_size: patch size for transformer
+            transformer_dim: embedding dim in transformer
+            depth: number of transformer layers
+        """
+        super().__init__()
+        self.conv1 = nn.Conv2d(c1, c1, kernel_size, padding=kernel_size//2, groups=c1)
+        self.conv2 = nn.Conv2d(c1, transformer_dim, 1)
+
+        encoder_layer = nn.TransformerEncoderLayer(d_model=transformer_dim, nhead=4, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+
+        self.conv3 = nn.Conv2d(transformer_dim, c2, 1)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+
+        x = self.conv1(x)
+        x = self.conv2(x)    # [B, C', H, W]
+
+        # flatten into patches
+        x = x.flatten(2).transpose(1, 2)  # [B, HW, C']
+        x = self.transformer(x)
+        x = x.transpose(1, 2).reshape(B, -1, H, W)
+
+        x = self.conv3(x)
+        return x
